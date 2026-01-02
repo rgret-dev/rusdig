@@ -1,11 +1,9 @@
 use bitflags::bitflags;
 use rand::random;
-use std::fmt::Debug;
+use std::fmt::{Debug, Display};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::string::FromUtf8Error;
 use thiserror::Error;
-
-const CLASS_INET: u16 = 1;
 
 fn read_u16(bytes: &mut &[u8]) -> Result<u16, DNSParseError> {
     let val = u16::from_be_bytes(
@@ -80,7 +78,9 @@ pub struct Query {
 }
 
 impl Query {
-    pub fn for_name(name: &str, ty: RecordType) -> Self {
+    pub fn for_name(name: &str, record_type: RecordType) -> Self {
+        const CLASS_INET: u16 = 1;
+
         Query {
             transaction_id: random(),
             flags: QueryFlags::default(),
@@ -91,7 +91,7 @@ impl Query {
             resource_answers: vec![],
             resource_queries: vec![QueryQuestion {
                 name: name.to_string(),
-                ty: ty as u16,
+                record_type,
                 class_code: CLASS_INET,
             }],
             resource_authorities: vec![],
@@ -158,7 +158,7 @@ impl Query {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 #[repr(u16)]
 pub enum RecordType {
     A = 1,
@@ -170,34 +170,40 @@ pub enum RecordType {
     TXT = 16,
 }
 
+impl TryFrom<u16> for RecordType {
+    type Error = DNSParseError;
+
+    fn try_from(value: u16) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(RecordType::A),
+            28 => Ok(RecordType::AAAA),
+            5 => Ok(RecordType::CNAME),
+            33 => Ok(RecordType::SRV),
+            2 => Ok(RecordType::NS),
+            15 => Ok(RecordType::MX),
+            16 => Ok(RecordType::TXT),
+            _ => return Err(DNSParseError::InvalidType),
+        }
+    }
+}
+
+impl Display for RecordType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RecordType::A => write!(f, "A"),
+            RecordType::AAAA => write!(f, "AAAA"),
+            RecordType::CNAME => write!(f, "CNAME"),
+            RecordType::SRV => write!(f, "SRV"),
+            RecordType::NS => write!(f, "NS"),
+            RecordType::MX => write!(f, "MX"),
+            RecordType::TXT => write!(f, "TXT"),
+        }
+    }
+}
+
 impl RecordType {
     pub fn id(&self) -> u16 {
         *self as u16
-    }
-
-    fn from_u16(ty: u16) -> Option<RecordType> {
-        Some(match ty {
-            1 => RecordType::A,
-            28 => RecordType::AAAA,
-            5 => RecordType::CNAME,
-            33 => RecordType::SRV,
-            2 => RecordType::NS,
-            15 => RecordType::MX,
-            16 => RecordType::TXT,
-            _ => return None,
-        })
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            RecordType::A => "A",
-            RecordType::AAAA => "AAAA",
-            RecordType::CNAME => "CNAME",
-            RecordType::SRV => "SRV",
-            RecordType::NS => "NS",
-            RecordType::MX => "MX",
-            RecordType::TXT => "TXT",
-        }
     }
 }
 
@@ -296,15 +302,15 @@ fn test_en_decode() {
 #[derive(Debug)]
 pub struct QueryQuestion {
     name: String,
-    ty: u16,
+    record_type: RecordType,
     class_code: u16,
 }
 
 impl QueryQuestion {
-    pub fn new(name: &str, ty: RecordType) -> QueryQuestion {
+    pub fn new(name: &str, record_type: RecordType) -> QueryQuestion {
         QueryQuestion {
             name: name.to_string(),
-            ty: ty as u16,
+            record_type,
             class_code: 1,
         }
     }
@@ -313,7 +319,7 @@ impl QueryQuestion {
         let mut bytes = vec![];
 
         bytes.append(&mut encode_name(self.name.as_str())?);
-        bytes.extend_from_slice(&self.ty.to_be_bytes());
+        bytes.extend_from_slice(&self.record_type.id().to_be_bytes());
         bytes.extend_from_slice(&self.class_code.to_be_bytes());
 
         Ok(bytes)
@@ -321,12 +327,16 @@ impl QueryQuestion {
 
     pub fn from_bytes(bytes: &mut &[u8]) -> Result<QueryQuestion, DNSParseError> {
         let name = decode_name(*bytes, bytes).map_err(|_| DNSParseError::InvalidName)?;
-        let ty = read_u16(bytes).map_err(|_| DNSParseError::InvalidType)?;
+
+        let record_type: RecordType = read_u16(bytes)
+            .map_err(|_| DNSParseError::InvalidType)?
+            .try_into()?;
+
         let class = read_u16(bytes).map_err(|_| DNSParseError::InvalidClass)?;
 
         Ok(QueryQuestion {
             name,
-            ty,
+            record_type,
             class_code: class,
         })
     }
@@ -335,8 +345,8 @@ impl QueryQuestion {
         &self.name
     }
 
-    pub fn ty_str(&self) -> Option<&'static str> {
-        RecordType::from_u16(self.ty).map(|rec| rec.as_str())
+    pub fn record_type(&self) -> RecordType {
+        self.record_type
     }
 }
 
@@ -374,7 +384,7 @@ impl QueryAnswer {
     }
 
     pub fn entry_type(&self) -> Option<RecordType> {
-        RecordType::from_u16(self.ty)
+        RecordType::try_from(self.ty).ok()
     }
 
     pub fn data_as_ipv6(&self) -> Result<Ipv6Addr, DNSParseError> {
